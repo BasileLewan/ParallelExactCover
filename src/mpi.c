@@ -486,7 +486,7 @@ struct instance_t * load_matrix(const char *filename)
 }
 
 
-struct context_t * backtracking_setup(const struct instance_t *instance)
+struct context_t * backtracking_setup(const struct instance_t *instance,int size,int my_rank)
 {
         struct context_t *ctx = malloc(sizeof(*ctx));
         if (ctx == NULL)
@@ -495,7 +495,8 @@ struct context_t * backtracking_setup(const struct instance_t *instance)
         ctx->nodes = 0;
         ctx->solutions = 0;
         int n = instance->n_items;
-        int m = instance->n_options;
+        int m = instance->n_options/size+1;
+        
         ctx->active_options = malloc(n * sizeof(*ctx->active_options));
         ctx->chosen_options = malloc(n * sizeof(*ctx->chosen_options));
         ctx->child_num = malloc(n * sizeof(*ctx->child_num));
@@ -509,18 +510,18 @@ struct context_t * backtracking_setup(const struct instance_t *instance)
 
         for (int item = 0; item < n; item++)
                 ctx->active_options[item] = sparse_array_init(m);
-        for (int option = 0; option < m; option++)
+        fprintf(stderr, "m %d : proc %d \n", m*my_rank, my_rank);   
+        for (int option = m*my_rank; option < m*(my_rank+1); option++)
                 for (int k = instance->ptr[option]; k < instance->ptr[option + 1]; k++) {
                         int item = instance->options[k];
                         sparse_array_add(ctx->active_options[item], option);
                 }
 
-
-
+	
         return ctx;
 }
 
-void solve(const struct instance_t *instance, struct context_t *ctx,int size,int my_rank)
+void solve(const struct instance_t *instance, struct context_t *ctx)
 {
         ctx->nodes++;
         if (ctx->nodes == next_report)
@@ -535,21 +536,11 @@ void solve(const struct instance_t *instance, struct context_t *ctx,int size,int
                 return;           /* échec : impossible de couvrir chosen_item */
         cover(instance, ctx, chosen_item);
         ctx->num_children[ctx->level] = active_options->len;
-        
-        int maxk;
-        if(my_rank==size-1){
-        	maxk=active_options->len;
-        }else{
-        	maxk=(active_options->len/size)*(my_rank+1);
-        }
-        int mink=(active_options->len/size)*my_rank;
-        //fprintf(stderr, "opt %d : %d min, %d max\n", my_rank, mink,maxk);      
-          
-        for (int k = mink; k < maxk; k++) {
+        for (int k = 0; k < active_options->len; k++) {
                 int option = active_options->p[k];
                 ctx->child_num[ctx->level] = k;
                 choose_option(instance, ctx, option, chosen_item);
-                solve(instance, ctx,size,my_rank);
+                solve(instance, ctx);
                 if (ctx->solutions >= max_solutions)
                         return;
                 unchoose_option(instance, ctx, option, chosen_item);
@@ -598,14 +589,17 @@ int main(int argc, char **argv)
 
 
         struct instance_t * instance = load_matrix(in_filename);
-        struct context_t * ctx = backtracking_setup(instance);
+        
+        struct context_t * ctx = backtracking_setup(instance,size,my_rank);
+        
         start = wtime();
         
-        solve(instance, ctx,size,my_rank);
+        //solve(instance, ctx);
         double fin=wtime() - start;
 	fprintf(stderr, "Temps total de calcul %d : %g sec\n", my_rank, fin);   
 	 
         if (my_rank==0){	
+        	solve(instance, ctx);
 		for(int i=1;i<size;i++){
 			long long nbSol;
 			double fin2;
