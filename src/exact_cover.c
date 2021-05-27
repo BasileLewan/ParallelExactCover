@@ -117,7 +117,7 @@ bool sparse_array_membership(const struct sparse_array_t *S, int x)
 
 bool sparse_array_empty(const struct sparse_array_t *S)
 {
-        return (S->len == 0);
+    return (S->len == 0);
 }
 
 void sparse_array_add(struct sparse_array_t *S, int x)
@@ -125,7 +125,7 @@ void sparse_array_add(struct sparse_array_t *S, int x)
         int i = S->len;
         S->p[i] = x;
         S->q[x] = i;
-        S->len = i + 1;
+        S->len++;
 }
 
 void sparse_array_remove(struct sparse_array_t *S, int x)
@@ -518,33 +518,47 @@ struct context_t * backtracking_setup(const struct instance_t *instance)
         return ctx;
 }
 
-void solve(const struct instance_t *instance, struct context_t *ctx)
+struct context_t* copy_ctx(const struct instance_t* instance, struct context_t* ctx) {
+    struct context_t* ctx_cpy = backtracking_setup(instance);
+    for (int i = 0; i < ctx->level; ++i) {
+        choose_option(instance, ctx_cpy, ctx->chosen_options[i], -1);
+        ctx_cpy->child_num[i] = ctx->child_num[i];
+        ctx_cpy->num_children[i] = ctx->num_children[i];
+    }
+    ctx_cpy->level = ctx->level;
+    ctx_cpy->nodes = ctx->nodes;                 
+    ctx_cpy->solutions = ctx->solutions;
+
+    return ctx_cpy;
+}
+
+void solve(const struct instance_t* instance, struct context_t* ctx)
 {
-        ctx->nodes++;
-        if (ctx->nodes == next_report)
-                progress_report(ctx);
-        if (sparse_array_empty(ctx->active_items)) {
-                solution_found(instance, ctx);
-                return;                         /* succès : plus d'objet actif */
-        }
-        int chosen_item = choose_next_item(ctx);
-        struct sparse_array_t *active_options = ctx->active_options[chosen_item];
-        if (sparse_array_empty(active_options))
-                return;           /* échec : impossible de couvrir chosen_item */
-        cover(instance, ctx, chosen_item);
-        ctx->num_children[ctx->level] = active_options->len;
-        for (int k = 0; k < active_options->len; k++) {
-                int option = active_options->p[k];
-                ctx->child_num[ctx->level] = k;
-                choose_option(instance, ctx, option, chosen_item);
-				#pragma omp task private(instance, ctx) final(true)
-                solve(instance, ctx);
-                if (ctx->solutions >= max_solutions)
-                        return;
-                unchoose_option(instance, ctx, option, chosen_item);
-        }
-		#pragma omp taskwait
-        uncover(instance, ctx, chosen_item);                      /* backtrack */
+    ctx->nodes++;
+    if (ctx->nodes == next_report)
+        progress_report(ctx);
+    if (sparse_array_empty(ctx->active_items)) {
+        solution_found(instance, ctx);
+        return;                         /* succès : plus d'objet actif */
+    }
+    int chosen_item = choose_next_item(ctx);
+    struct sparse_array_t* active_options = ctx->active_options[chosen_item];
+    if (sparse_array_empty(active_options))
+        return;           /* échec : impossible de couvrir chosen_item */
+    cover(instance, ctx, chosen_item);
+    ctx->num_children[ctx->level] = active_options->len;
+    for (int k = 0; k < active_options->len; k++) {
+        int option = active_options->p[k];
+        ctx->child_num[ctx->level] = k;
+        choose_option(instance, ctx, option, chosen_item);
+#pragma omp task shared(instance, ctx) final(true)
+        solve(instance, ctx);
+        if (ctx->solutions >= max_solutions)
+            return;
+        unchoose_option(instance, ctx, option, chosen_item);
+    }
+    uncover(instance, ctx, chosen_item);                      /* backtrack */
+#pragma omp taskwait
 }
 
 int main(int argc, char **argv)
@@ -582,10 +596,49 @@ int main(int argc, char **argv)
 
         struct instance_t * instance = load_matrix(in_filename);
         struct context_t * ctx = backtracking_setup(instance);
+
+        /* Trouver le nb de branches */
+        int chosen_item = choose_next_item(ctx);
+        struct sparse_array_t* active_options = ctx->active_options[chosen_item];
+        if (sparse_array_empty(active_options))
+            exit(EXIT_FAILURE);
+        cover(instance, ctx, chosen_item);
+        ctx->num_children[ctx->level] = active_options->len;
+
+        /* On crée un contexte pour chanque branche */
+        struct context_t ** lst_ctx = malloc(active_options->len * sizeof(struct context_t*));
+
+        /* On initialise les contextes */
+        for (int k = 0; k < active_options->len; k++) {
+            lst_ctx[k] = backtracking_setup(instance);
+            int chosen_item = choose_next_item(lst_ctx[k]);
+            struct sparse_array_t* active_options_k = lst_ctx[k]->active_options[chosen_item];
+            if (sparse_array_empty(active_options_k))
+                exit(EXIT_FAILURE);
+            cover(instance, lst_ctx[k], chosen_item);
+            lst_ctx[k]->num_children[lst_ctx[k]->level] = active_options_k->len;
+        }
+        
         start = wtime();
+
+        /* Chaque contexte parcours une branche */
 #pragma omp parallel
  #pragma omp single nowait
-        solve(instance, ctx);
+        for (int k = 0; k < active_options->len; k++) {
+#pragma omp task final(true)
+            {
+                int option = active_options->p[k];
+                lst_ctx[k]->child_num[lst_ctx[k]->level] = k;
+                choose_option(instance, lst_ctx[k], option, chosen_item);
+                solve(instance, lst_ctx[k]);
+                unchoose_option(instance, lst_ctx[k], option, chosen_item);
+            }
+        }
+#pragma omp taskwait
+
+        /* On récupère le nb de solutions final*/
+        for (int k = 0; k < active_options->len; k++)
+            ctx->solutions += lst_ctx[k]->solutions;
 
         printf("FINI. Trouvé %lld solutions en %.1fs\n", ctx->solutions, 
                         wtime() - start);
