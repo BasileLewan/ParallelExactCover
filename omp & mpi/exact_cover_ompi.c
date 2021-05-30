@@ -563,109 +563,103 @@ void solve(const struct instance_t* instance, struct context_t* ctx)
 }
 
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
-	int my_rank, size, tag = 0;
-   	MPI_Status status;
-    	MPI_Init(&argc,&argv);
-    	MPI_Comm_size(MPI_COMM_WORLD, &size);
-    	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-        struct option longopts[5] = {
-                {"in", required_argument, NULL, 'i'},
-                {"progress-report", required_argument, NULL, 'v'},
-                {"print-solutions", no_argument, NULL, 'p'},
-                {"stop-after", required_argument, NULL, 's'},
-                {NULL, 0, NULL, 0}
-        };
-        char ch;
-        while ((ch = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
-                switch (ch) {
-                case 'i':
-                        in_filename = optarg;
-                        break;
-                case 'p':
-                        print_solutions = true;
-                        break;
-                case 's':
-                        max_solutions = atoll(optarg);
-                        break;
-                case 'v':
-                        report_delta = atoll(optarg);
-                        break;          
-                default:
-                        errx(1, "Unknown option\n");
-                }
+    int my_rank, size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    struct option longopts[5] = {
+            {"in", required_argument, NULL, 'i'},
+            {"progress-report", required_argument, NULL, 'v'},
+            {"print-solutions", no_argument, NULL, 'p'},
+            {"stop-after", required_argument, NULL, 's'},
+            {NULL, 0, NULL, 0}
+    };
+    char ch;
+    while ((ch = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
+        switch (ch) {
+        case 'i':
+            in_filename = optarg;
+            break;
+        case 'p':
+            print_solutions = true;
+            break;
+        case 's':
+            max_solutions = atoll(optarg);
+            break;
+        case 'v':
+            report_delta = atoll(optarg);
+            break;
+        default:
+            errx(1, "Unknown option\n");
         }
-        if (in_filename == NULL)
-                usage(argv);
-        next_report = report_delta;
+    }
+    if (in_filename == NULL)
+        usage(argv);
+    next_report = report_delta;
 
 
-        struct instance_t * instance = load_matrix(in_filename);
-        struct context_t * ctx = backtracking_setup(instance);
+    struct instance_t* instance = load_matrix(in_filename);
+    struct context_t* ctx = backtracking_setup(instance);
 
-        /* Trouver le nb de branches */
-        int chosen_item = choose_next_item(ctx);
-        struct sparse_array_t* active_options = ctx->active_options[chosen_item];
-        if (sparse_array_empty(active_options))
+    /* Trouver le nb de branches */
+    int chosen_item = choose_next_item(ctx);
+    struct sparse_array_t* active_options = ctx->active_options[chosen_item];
+    if (sparse_array_empty(active_options))
+        exit(EXIT_FAILURE);
+    cover(instance, ctx, chosen_item);
+    ctx->num_children[ctx->level] = active_options->len;
+
+    /* On crée un contexte pour chanque branche */
+    struct context_t** lst_ctx = malloc(active_options->len * sizeof(struct context_t*));
+
+    /* On initialise les contextes */
+    for (int k = 0; k < active_options->len; k++) {
+        lst_ctx[k] = backtracking_setup(instance);
+        int chosen_item = choose_next_item(lst_ctx[k]);
+        struct sparse_array_t* active_options_k = lst_ctx[k]->active_options[chosen_item];
+        if (sparse_array_empty(active_options_k))
             exit(EXIT_FAILURE);
-        cover(instance, ctx, chosen_item);
-        ctx->num_children[ctx->level] = active_options->len;
+        cover(instance, lst_ctx[k], chosen_item);
+        lst_ctx[k]->num_children[lst_ctx[k]->level] = active_options_k->len;
+    }
 
-        /* On crée un contexte pour chanque branche */
-        struct context_t ** lst_ctx = malloc(active_options->len * sizeof(struct context_t*));
+    start = wtime();
 
-        /* On initialise les contextes */
-        for (int k = 0; k < active_options->len; k++) {
-            lst_ctx[k] = backtracking_setup(instance);
-            int chosen_item = choose_next_item(lst_ctx[k]);
-            struct sparse_array_t* active_options_k = lst_ctx[k]->active_options[chosen_item];
-            if (sparse_array_empty(active_options_k))
-                exit(EXIT_FAILURE);
-            cover(instance, lst_ctx[k], chosen_item);
-            lst_ctx[k]->num_children[lst_ctx[k]->level] = active_options_k->len;
-        }
-        
-        start = wtime();
-
-        /* Chaque contexte parcours une branche */
+    /* Chaque contexte parcours une branche */
 #pragma omp parallel
 #pragma omp single nowait
-        for (int k = 0; k < active_options->len; k++) {
+    for (int k = 0; k < active_options->len; k++) {
 #pragma omp task final(true)
-            {
-            	if(k%size==my_rank){
-		        int option = active_options->p[k];
-		        lst_ctx[k]->child_num[lst_ctx[k]->level] = k;
-		        choose_option(instance, lst_ctx[k], option, chosen_item);
-		        solve(instance, lst_ctx[k]);
-		        unchoose_option(instance, lst_ctx[k], option, chosen_item);
-	        }
+        {
+            if (k % size == my_rank) {
+                int option = active_options->p[k];
+                lst_ctx[k]->child_num[lst_ctx[k]->level] = k;
+                choose_option(instance, lst_ctx[k], option, chosen_item);
+                solve(instance, lst_ctx[k]);
+                unchoose_option(instance, lst_ctx[k], option, chosen_item);
             }
         }
+    }
 #pragma omp taskwait
 
-        /* On récupère le nb de solutions final*/
-        for (int k = 0; k < active_options->len; k++)
-            ctx->solutions += lst_ctx[k]->solutions;
+    /* On récupère le nb de solutions final*/
+    for (int k = 0; k < active_options->len; k++)
+        ctx->solutions += lst_ctx[k]->solutions;
 
-        double fin=wtime() - start;
-	fprintf(stderr, "Nombre de sol: %lld ,Temps total de calcul %d : %g sec\n",ctx->solutions, my_rank, fin);   
-	 
-        if (my_rank==0){	
-        	
-		for(int i=1;i<size;i++){
-			long long nbSol;
-        		MPI_Recv(&nbSol, 1, MPI_LONG_LONG, i, tag, MPI_COMM_WORLD, &status);
-        		ctx->solutions+=nbSol;
-		}
-		double finFinale=wtime() - start;
-        	printf("FINI. Trouvé %lld solutions en %.1fs\n", ctx->solutions, finFinale);
-        }else{
-        	MPI_Send(&(ctx->solutions), 1,MPI_LONG_LONG, 0, tag, MPI_COMM_WORLD);
-        }
-        MPI_Finalize();
-        exit(EXIT_SUCCESS);
+    double fin = wtime() - start;
+
+    fprintf(stderr, "Nombre de sol: %lld ,Temps total de calcul %d : %g sec\n", ctx->solutions, my_rank, fin);
+    long long res = 0;
+    MPI_Reduce(&(ctx->solutions), &res, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (my_rank == 0) 
+        printf("FINI. Trouvé %lld solutions en %.1fs\n", res, wtime() - start);
+    
+
+    MPI_Finalize();
+    exit(EXIT_SUCCESS);
 }
 
 

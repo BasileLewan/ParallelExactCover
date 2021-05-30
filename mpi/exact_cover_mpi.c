@@ -576,71 +576,64 @@ void solve_part1(const struct instance_t *instance, struct context_t *ctx,int si
 
         uncover(instance, ctx, chosen_item);                      /* backtrack */
 }
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
-	int my_rank, size, tag = 0;
-   	MPI_Status status;
-    	MPI_Init(&argc,&argv);
-    	MPI_Comm_size(MPI_COMM_WORLD, &size);
-    	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    	
-        struct option longopts[5] = {
-                {"in", required_argument, NULL, 'i'},
-                {"progress-report", required_argument, NULL, 'v'},
-                {"print-solutions", no_argument, NULL, 'p'},
-                {"stop-after", required_argument, NULL, 's'},
-                {NULL, 0, NULL, 0}
-        };
-        char ch;
-        while ((ch = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
-                switch (ch) {
-                case 'i':
-                        in_filename = optarg;
-                        break;
-                case 'p':
-                        print_solutions = true;
-                        break;
-                case 's':
-                        max_solutions = atoll(optarg);
-                        break;
-                case 'v':
-                        report_delta = atoll(optarg);
-                        break;          
-                default:
-                        errx(1, "Unknown option\n");
-                }
+    int my_rank, size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+
+    struct option longopts[5] = {
+            {"in", required_argument, NULL, 'i'},
+            {"progress-report", required_argument, NULL, 'v'},
+            {"print-solutions", no_argument, NULL, 'p'},
+            {"stop-after", required_argument, NULL, 's'},
+            {NULL, 0, NULL, 0}
+    };
+    char ch;
+    while ((ch = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
+        switch (ch) {
+        case 'i':
+            in_filename = optarg;
+            break;
+        case 'p':
+            print_solutions = true;
+            break;
+        case 's':
+            max_solutions = atoll(optarg);
+            break;
+        case 'v':
+            report_delta = atoll(optarg);
+            break;
+        default:
+            errx(1, "Unknown option\n");
         }
-        if (in_filename == NULL)
-                usage(argv);
-        next_report = report_delta;
+    }
+    if (in_filename == NULL)
+        usage(argv);
+    next_report = report_delta;
 
 
-        struct instance_t * instance = load_matrix(in_filename);
-        
-        struct context_t * ctx = backtracking_setup(instance);
-        
-        start = wtime();
-        
-        solve_part1(instance, ctx,size,my_rank);
-        double fin=wtime() - start;
-	fprintf(stderr, "Nombre de sol: %lld ,Temps total de calcul %d : %g sec\n",ctx->solutions, my_rank, fin);   
-	 
-        if (my_rank==0){	
-        	
-		for(int i=1;i<size;i++){
-			long long nbSol;
-        		MPI_Recv(&nbSol, 1, MPI_LONG_LONG, i, tag, MPI_COMM_WORLD, &status);
-        		ctx->solutions+=nbSol;
-		}
-		double finFinale=wtime() - start;
-        	printf("FINI. Trouvé %lld solutions en %.1fs\n", ctx->solutions, finFinale);
-        }else{
-        	MPI_Send(&(ctx->solutions), 1,MPI_LONG_LONG, 0, tag, MPI_COMM_WORLD);
-        }
+    struct instance_t* instance = load_matrix(in_filename);
 
-		
-        MPI_Finalize();
-        exit(EXIT_SUCCESS);
+    struct context_t* ctx = backtracking_setup(instance);
+
+    start = wtime();
+
+    solve_part1(instance, ctx, size, my_rank);
+    double fin = wtime() - start;
+    fprintf(stderr, "Nombre de sol: %lld ,Temps total de calcul %d : %g sec\n", ctx->solutions, my_rank, fin);
+
+    long long res = 0;
+    MPI_Reduce(&(ctx->solutions), &res, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (my_rank == 0)
+        printf("FINI. Trouvé %lld solutions en %.1fs\n", res, wtime() - start);
+
+
+
+    MPI_Finalize();
+    exit(EXIT_SUCCESS);
 }
 
 
